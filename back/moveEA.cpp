@@ -31,8 +31,8 @@ auto createControllerRokaeXB4()->std::unique_ptr<aris::control::Controller>
     std::string xml_str_roll =
         "<EthercatMotion phy_id=\"0\" product_code=\"0x00030924\""
         " vendor_id=\"0x9A\" revision_num=\"0x00010420\" dc_assign_activate=\"0x0300\""
-        " min_pos=\"-3.14\" max_pos=\"3.14\" max_vel=\"5\" min_vel=\"-5\""
-        " max_acc=\"50\" min_acc=\"-50\" max_pos_following_error=\"0.01\" max_vel_following_error=\"0.01\""
+        " min_pos=\"-3.14\" max_pos=\"3.14\" max_vel=\"0.5\" min_vel=\"-0.5\""
+        " max_acc=\"5\" min_acc=\"-5\" max_pos_following_error=\"0.005\" max_vel_following_error=\"0.005\""
         " home_pos=\"0\" pos_factor=\""+std::to_string(pos_factor_roll)+"\" pos_offset=\"0.0\">"
         "	<SyncManagerPoolObject>"
         "		<SyncManager is_tx=\"false\"/>"
@@ -231,16 +231,64 @@ typedef struct _BOX
     void*  shm;
     double num_1;
     double num_2;
-
 }Box;
 
-auto SetVel::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+auto SetVel::prepairNrt(PlanTarget &target)->void
 {
     Box box;
     box.shm_id = shmget(13, 2048, IPC_CREAT | 0666);
     box.shm = shmat(box.shm_id, NULL, 0);
     Box *pBox = (Box*)(box.shm);
     target.param = pBox;
+
+    std::vector<std::pair<std::string, std::any>> ret_value;
+    target.ret = ret_value;
+}
+
+auto SetVel::executeRT(PlanTarget &target)->int
+{
+    int time = 10000000;
+    static double joint_1_old;
+
+    auto &param = std::any_cast<Box*&>(target.param);
+
+    if(param->flag == 1)
+    {
+        param->flag = 0;
+        char* p = param->szMsg;
+        sscanf(p,"%lf %lf",&(param->num_1), &(param->num_2));
+
+        if(target.count == 1)
+        {
+          joint_1_old = param->num_2;
+        }
+        double joint_1_error = std::abs(param->num_2 - joint_1_old);
+        if(joint_1_error > 0.01){
+          int number = joint_1_error/0.01;
+          for(int i =1; i< number; i++){
+            double joint_1_new = joint_1_old + i * 0.01;
+            joint_1.push(joint_1_new);
+          }
+          joint_1.push(param->num_2);
+          joint_1_old = param->num_2;
+        }else{
+          joint_1.push(param->num_2);
+          joint_1_old = param->num_2;
+        }
+    }
+
+    return time - target.count;
+}
+auto SetVel::collectNrt(PlanTarget &target)->void {}
+SetVel::SetVel(const std::string &name) :Plan(name)
+{
+    command().loadXmlStr(
+        "<Command name=\"SetVel\">"
+        "</Command>");
+}
+
+auto Motion::prepairNrt(PlanTarget &target)->void
+{
     for(auto &option:target.mot_options)option|=
             aris::plan::Plan::USE_TARGET_VEL
             |aris::plan::Plan::NOT_CHECK_VEL_CONTINUOUS
@@ -252,57 +300,36 @@ auto SetVel::prepairNrt(const std::map<std::string, std::string> &params, PlanTa
             |aris::plan::Plan::NOT_CHECK_POS_FOLLOWING_ERROR
             |aris::plan::Plan::NOT_CHECK_POS_MAX
             |aris::plan::Plan::NOT_CHECK_POS_MIN;
+
     std::vector<std::pair<std::string, std::any>> ret_value;
     target.ret = ret_value;
 }
 
-auto SetVel::executeRT(PlanTarget &target)->int
+auto Motion::executeRT(PlanTarget &target)->int
 {
-  int time = 10000000;
   static double joint_1_old;
-  static double joint_1_target;
-
-  auto &param = std::any_cast<Box*&>(target.param);
-  auto &controller = target.controller;
-  auto &cout = controller->lout();
-
-  if(param->flag == 1)
-  {
-      param->flag = 0;
-      char* p = param->szMsg;
-      sscanf(p,"%lf %lf", &(param->num_1), &(param->num_2));
-
-      joint_1_old = controller->motionPool()[0].actualPos();
-      double joint_1_error = param->num_2 - joint_1_old;
-      std::cout << joint_1_error << std::endl;
-      if(std::abs(joint_1_error) > 0.007){
-        if(joint_1_error > 0){
-          joint_1_target = joint_1_old + 0.007;
-        }
-        else{
-          joint_1_target = joint_1_old - 0.007;
-        }
-      }
-      else{
-        joint_1_target = param->num_2;
-      }
-      joint_1_old = param->num_2;
-
-      controller->motionPool()[0].setTargetPos(joint_1_target);
-      cout << "joint_1_target: " <<joint_1_target <<std::endl;
-      cout << "joint_1_old: " << joint_1_old <<std::endl;
+  int time = 10000000;
+  if(!joint_1.empty()){
+    double joint_1_target = joint_1.front();
+    if(target.count == 1)
+    {
+      joint_1_old = joint_1_target;
+    }
+    double error = std::abs(joint_1_target - joint_1_old);
+    joint_1_old = joint_1_target;
+    printf("error = %lf\n", error);
+    joint_1.pop();
   }
-    return time - target.count;
+  return time - target.count;
 }
 
-auto SetVel::collectNrt(PlanTarget &target)->void {}
-SetVel::SetVel(const std::string &name) :Plan(name)
+auto Motion::collectNrt(PlanTarget &target)->void {}
+Motion::Motion(const std::string &name) :Plan(name)
 {
     command().loadXmlStr(
-        "<Command name=\"SetVel\">"
+        "<Command name=\"Motion\">"
         "</Command>");
 }
-
 
 //  planPool //
 auto createPlanRootRokaeXB4()->std::unique_ptr<aris::plan::PlanRoot>
@@ -316,6 +343,7 @@ auto createPlanRootRokaeXB4()->std::unique_ptr<aris::plan::PlanRoot>
     plan_root->planPool().add<aris::plan::Recover>();
     plan_root->planPool().add<aris::plan::Reset>();
     plan_root->planPool().add<SetVel>();
+//    plan_root->planPool().add<Motion>();
     return plan_root;
 }
 
@@ -351,7 +379,8 @@ int main(int argc, char *argv[])
     cs.executeCmd(aris::core::Msg("en"));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     cs.executeCmd(aris::core::Msg("SetVel"));
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+//    cs.executeCmd(aris::core::Msg("Motion"));
     //Receive Command//
     cout<< "ok" <<std::endl;
     cs.runCmdLine();
